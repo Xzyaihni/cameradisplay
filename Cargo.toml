@@ -1,0 +1,9 @@
+[package]
+name = "cameradisplay"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sdl2 = "0.37.0"
+nokhwa = { version = "0.10", features = ["input-native"] }
+image = "0.25.5"
