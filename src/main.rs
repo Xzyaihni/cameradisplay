@@ -1,9 +1,20 @@
 use std::time::Instant;
 
+use image::Rgb;
+
 use nokhwa::{
     Camera,
     pixel_format::RgbFormat,
-    utils::{RequestedFormat, RequestedFormatType, CameraIndex, Resolution}
+    utils::{
+        RequestedFormat,
+        RequestedFormatType,
+        CameraIndex,
+        Resolution,
+        CameraControl,
+        KnownCameraControl,
+        ControlValueSetter,
+        ControlValueDescription
+    }
 };
 
 use sdl2::{
@@ -24,10 +35,10 @@ fn set_closest_aspect(window: &mut WindowCanvas, aspect: f64) -> bool
 
     let (new_width, new_height) = if height_scaled > width as f64
     {
-        (height_scaled as u32, height)
+        (width, (width as f64 / aspect) as u32)
     } else
     {
-        (width, (width as f64 / aspect) as u32)
+        ((height as f64 * aspect) as u32, height)
     };
 
     if new_width == width && new_height == height
@@ -70,6 +81,112 @@ impl<const WINDOW_SIZE: usize> Averager<WINDOW_SIZE>
     }
 }
 
+#[allow(dead_code)]
+struct ControlInfo
+{
+    pub min: i64,
+    pub max: i64,
+    pub value: i64,
+    pub step: i64,
+    pub default: i64
+}
+
+struct ControlController
+{
+    control: Option<CameraControl>,
+    current: i64,
+    which: KnownCameraControl
+}
+
+impl ControlController
+{
+    pub fn new(camera: &Camera, which: KnownCameraControl) -> Self
+    {
+        let control = camera.camera_control(which).ok();
+
+        let mut this = Self{control, current: 0, which};
+
+        this.current = this.current_raw();
+
+        this
+    }
+
+    fn info(&self) -> ControlInfo
+    {
+        if let ControlValueDescription::IntegerRange{
+            min,
+            max,
+            value,
+            step,
+            default
+        } = self.control.as_ref().unwrap().description().clone()
+        {
+            ControlInfo{min, max, value, step, default}
+        } else
+        {
+            panic!("control must be an integer range")
+        }
+    }
+
+    pub fn clamp(&self, value: i64) -> i64
+    {
+        let info = self.info();
+        value.clamp(info.min, info.max)
+    }
+
+    fn current_raw(&self) -> i64
+    {
+        self.info().value
+    }
+
+    pub fn current(&self) -> i64
+    {
+        self.current
+    }
+
+    pub fn reset(&mut self, camera: &mut Camera)
+    {
+        let value = self.info().default;
+        self.set(camera, value)
+    }
+
+    pub fn set_max(&mut self, camera: &mut Camera)
+    {
+        let value = self.info().max;
+        self.set(camera, value)
+    }
+
+    pub fn set(&mut self, camera: &mut Camera, value: i64)
+    {
+        if self.control.is_none()
+        {
+            return;
+        }
+
+        let value = self.clamp(value);
+
+        if value == self.current
+        {
+            return;
+        }
+
+        self.current = value;
+
+        let value = ControlValueSetter::Integer(value);
+        if let Err(err) = camera.set_camera_control(self.which, value)
+        {
+            eprintln!("error setting control: {err}");
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum GammaMode
+{
+    Manual{fullbright: bool, current: i64},
+    Auto
+}
+
 fn main()
 {
     let ctx = sdl2::init().unwrap();
@@ -78,6 +195,9 @@ fn main()
 
     let camera_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
     let mut camera = Camera::new(CameraIndex::Index(0), camera_format).unwrap();
+
+    let mut gamma_control = ControlController::new(&camera, KnownCameraControl::Gamma);
+    let mut brightness_control = ControlController::new(&camera, KnownCameraControl::Brightness);
 
     let Resolution{width_x: width, height_y: height} = camera.camera_format().resolution();
 
@@ -98,28 +218,87 @@ fn main()
 
     camera.open_stream().unwrap();
 
+    let mut gamma_mode = GammaMode::Manual{fullbright: false, current: gamma_control.current()};
+
     let mut averager: Averager<5> = Averager::new();
+    let target_brightness = 15.0;
+    let brightness_range = 10.0;
 
     let mut title_delay = 0;
+
     let mut resized = false;
     let mut last_frame = Instant::now();
-    loop
+
+    'window_loop: loop
     {
         for event in events.poll_iter()
         {
             match event
             {
-                Event::Quit{..} => return,
+                Event::Quit{..} => break 'window_loop,
                 Event::Window{win_event: WindowEvent::SizeChanged(_, _), ..} =>
                 {
                     resized = true;
                 },
-                Event::KeyDown{keycode: Some(Keycode::SPACE), ..} =>
+                Event::KeyDown{keycode: Some(code), ..} =>
                 {
-                    if let Err(err) = canvas.window_mut().set_size(width, height)
+                    match code
                     {
-                        eprintln!("error setting window size: {err}");
+                        Keycode::SPACE =>
+                        {
+                            if let Err(err) = canvas.window_mut().set_size(width, height)
+                            {
+                                eprintln!("error setting window size: {err}");
+                            }
+                        },
+                        Keycode::G =>
+                        {
+                            gamma_control.reset(&mut camera);
+                            brightness_control.reset(&mut camera);
+
+                            gamma_mode = match gamma_mode
+                            {
+                                GammaMode::Manual{..} => GammaMode::Auto,
+                                GammaMode::Auto => GammaMode::Manual{fullbright: false, current: gamma_control.current()}
+                            };
+                        },
+                        Keycode::F =>
+                        {
+                            if let GammaMode::Manual{ref mut fullbright, current} = gamma_mode
+                            {
+                                *fullbright = !*fullbright;
+
+                                if *fullbright
+                                {
+                                    gamma_control.set_max(&mut camera);
+                                    brightness_control.set_max(&mut camera);
+                                } else
+                                {
+                                    gamma_control.set(&mut camera, current);
+                                    brightness_control.reset(&mut camera);
+                                }
+                            }
+                        },
+                        Keycode::Up | Keycode::Down =>
+                        {
+                            if let GammaMode::Manual{ref mut current, ..} = gamma_mode
+                            {
+                                let new_current = if let Keycode::Up = code
+                                {
+                                    *current + 1
+                                } else
+                                {
+                                    *current - 1
+                                };
+
+                                gamma_control.set(&mut camera, new_current);
+                                *current = gamma_control.current();
+                            }
+                        },
+                        _ => ()
                     }
+
+                    title_delay = 0;
                 },
                 _ => ()
             }
@@ -152,6 +331,55 @@ fn main()
                 continue;
             }
         };
+
+        if gamma_mode == GammaMode::Auto
+        {
+            let average_brightness = {
+                let total = (image.width() * image.height()) as f64;
+
+                let luminance = image.pixels().map(|Rgb([r, g, b])|
+                {
+                    let d = |&x|
+                    {
+                        let value = x as f64 / u8::MAX as f64;
+
+                        if value < 0.04045
+                        {
+                            value / 12.92
+                        } else
+                        {
+                            ((value + 0.055) / 1.055).powf(2.4)
+                        }
+                    };
+
+                    d(r) * 0.2126 + d(g) * 0.7152 + d(b) * 0.0722
+                }).sum::<f64>() / total;
+
+                if luminance <= 0.008856
+                {
+                    luminance * 903.3
+                } else
+                {
+                    luminance.cbrt() * 116.0 - 16.0
+                }
+            };
+
+            let brightness_diff = target_brightness - average_brightness;
+
+            if brightness_diff.abs() > brightness_range
+            {
+                let current_gamma = gamma_control.current();
+                let new_gamma = if brightness_diff < 0.0
+                {
+                    current_gamma - 1
+                } else
+                {
+                    current_gamma + 1
+                };
+
+                gamma_control.set(&mut camera, new_gamma);
+            }
+        }
 
         let surface_rect;
         let is_same_size;
@@ -196,7 +424,24 @@ fn main()
             let height = surface_rect.height();
 
             let fps = 1000.0 / current_average;
-            let mut title = format!("{width}x{height} {current_average:.1} ms ({fps:.1} fps)");
+            let gamma = gamma_control.current();
+
+            let gamma_tag = match gamma_mode
+            {
+                GammaMode::Auto => "AUTO",
+                GammaMode::Manual{fullbright: true, ..} => "FULLBRIGHT",
+                GammaMode::Manual{..} => ""
+            };
+
+            let gamma_tag = if gamma_tag.is_empty()
+            {
+                String::new()
+            } else
+            {
+                format!("[{gamma_tag}] ")
+            };
+
+            let mut title = format!("{width}x{height}, {fps:.1} fps, {gamma_tag}{gamma} gamma");
 
             if is_same_size
             {
@@ -213,4 +458,7 @@ fn main()
 
         last_frame = Instant::now();
     }
+
+    gamma_control.reset(&mut camera);
+    brightness_control.reset(&mut camera);
 }
