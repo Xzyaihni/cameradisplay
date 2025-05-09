@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use image::Rgb;
+use image::{Rgb, DynamicImage};
 
 use nokhwa::{
     Camera,
@@ -194,7 +194,16 @@ fn main()
     let video = ctx.video().unwrap();
 
     let camera_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
-    let mut camera = Camera::new(CameraIndex::Index(0), camera_format).unwrap();
+    let mut camera = (0..10).filter_map(|i| Camera::new(CameraIndex::Index(i), camera_format).ok())
+        .next()
+        .unwrap_or_else(|| panic!("couldnt find a camera"));
+
+    let request_framerate = 10;
+
+    if let Err(err) = camera.set_frame_rate(request_framerate)
+    {
+        eprintln!("error setting framerate to {request_framerate}: {err}");
+    }
 
     let mut gamma_control = ControlController::new(&camera, KnownCameraControl::Gamma);
     let mut brightness_control = ControlController::new(&camera, KnownCameraControl::Brightness);
@@ -224,6 +233,8 @@ fn main()
     let target_brightness = 15.0;
     let brightness_range = 10.0;
 
+    let mut mirrored = false;
+
     let mut title_delay = 0;
 
     let mut resized = false;
@@ -250,6 +261,10 @@ fn main()
                             {
                                 eprintln!("error setting window size: {err}");
                             }
+                        },
+                        Keycode::M =>
+                        {
+                            mirrored = !mirrored;
                         },
                         Keycode::G =>
                         {
@@ -322,7 +337,7 @@ fn main()
             }
         };
 
-        let image = match frame.decode_image::<RgbFormat>()
+        let mut image = match frame.decode_image::<RgbFormat>()
         {
             Ok(x) => x,
             Err(err) =>
@@ -331,6 +346,11 @@ fn main()
                 continue;
             }
         };
+
+        if mirrored
+        {
+            image = DynamicImage::from(image).fliph().to_rgb8();
+        }
 
         if gamma_mode == GammaMode::Auto
         {
