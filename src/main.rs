@@ -192,6 +192,7 @@ fn main()
     let ctx = sdl2::init().unwrap();
 
     let video = ctx.video().unwrap();
+    video.enable_screen_saver();
 
     let camera_format = RequestedFormat::new::<RgbFormat>(RequestedFormatType::AbsoluteHighestResolution);
     let mut camera = (0..10).filter_map(|i| Camera::new(CameraIndex::Index(i), camera_format).ok())
