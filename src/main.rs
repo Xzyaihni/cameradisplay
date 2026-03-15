@@ -18,7 +18,8 @@ use nokhwa::{
 };
 
 use sdl2::{
-    keyboard::Keycode,
+    rect::Rect,
+    keyboard::{Mod, Keycode},
     pixels::PixelFormatEnum,
     surface::Surface,
     event::{WindowEvent, Event},
@@ -180,6 +181,41 @@ impl ControlController
     }
 }
 
+enum CropControl
+{
+    ZoomXPlus,
+    ZoomXMinus,
+    ZoomYPlus,
+    ZoomYMinus,
+    ShiftXPlus,
+    ShiftXMinus,
+    ShiftYPlus,
+    ShiftYMinus,
+    Length
+}
+
+#[derive(Debug, PartialEq)]
+struct CropInfo
+{
+    pub scale_x: f32,
+    pub scale_y: f32,
+    pub pos_x: f32,
+    pub pos_y: f32
+}
+
+impl CropInfo
+{
+    pub fn new() -> Self
+    {
+        Self{
+            scale_x: 1.0,
+            scale_y: 1.0,
+            pos_x: 0.5,
+            pos_y: 0.5
+        }
+    }
+}
+
 #[derive(Debug, PartialEq, Eq)]
 enum GammaMode
 {
@@ -234,12 +270,33 @@ fn main()
     let target_brightness = 15.0;
     let brightness_range = 10.0;
 
+    let mut crop_info = CropInfo::new();
+    let mut crop_controls = [false; CropControl::Length as usize];
+
     let mut mirrored = false;
 
     let mut title_delay = 0;
 
     let mut resized = false;
     let mut last_frame = Instant::now();
+
+    let crop_control_of = |code, keymod|
+    {
+        let is_shift = keymod == Mod::LSHIFTMOD;
+
+        match code
+        {
+            Keycode::Minus if is_shift => Some(CropControl::ZoomYMinus),
+            Keycode::Equals if is_shift => Some(CropControl::ZoomYPlus),
+            Keycode::Minus => Some(CropControl::ZoomXMinus),
+            Keycode::Equals => Some(CropControl::ZoomXPlus),
+            Keycode::Up if is_shift => Some(CropControl::ShiftYPlus),
+            Keycode::Down if is_shift => Some(CropControl::ShiftYMinus),
+            Keycode::Right if is_shift => Some(CropControl::ShiftXPlus),
+            Keycode::Left if is_shift => Some(CropControl::ShiftXMinus),
+            _ => None
+        }
+    };
 
     'window_loop: loop
     {
@@ -252,8 +309,20 @@ fn main()
                 {
                     resized = true;
                 },
-                Event::KeyDown{keycode: Some(code), ..} =>
+                Event::KeyUp{keycode: Some(code), keymod, ..} =>
                 {
+                    if let Some(crop_control) = crop_control_of(code, keymod)
+                    {
+                        crop_controls[crop_control as usize] = false;
+                    }
+                },
+                Event::KeyDown{keycode: Some(code), keymod, ..} =>
+                {
+                    if let Some(crop_control) = crop_control_of(code, keymod)
+                    {
+                        crop_controls[crop_control as usize] = true;
+                    }
+
                     match code
                     {
                         Keycode::SPACE =>
@@ -295,7 +364,7 @@ fn main()
                                 }
                             }
                         },
-                        Keycode::Up | Keycode::Down =>
+                        Keycode::Up | Keycode::Down if keymod != Mod::LSHIFTMOD =>
                         {
                             if let GammaMode::Manual{ref mut current, ..} = gamma_mode
                             {
@@ -402,9 +471,76 @@ fn main()
             }
         }
 
-        let surface_rect;
-        let is_same_size;
+        let frametime = last_frame.elapsed().as_secs_f64() * 1000.0;
+        let current_average = averager.add(frametime);
 
+        {
+            let dt = (current_average / 1000.0) as f32;
+
+            let zoom_speed = 0.5;
+
+            let zoom_in_factor = 1.0 - dt * zoom_speed;
+            let zoom_out_factor = 1.0 + dt * zoom_speed;
+
+            let c = |x| crop_controls[x as usize];
+
+            if c(CropControl::ZoomXPlus)
+            {
+                crop_info.scale_x = (crop_info.scale_x * zoom_in_factor).clamp(0.0, 1.0);
+            }
+
+            if c(CropControl::ZoomYPlus)
+            {
+                crop_info.scale_y = (crop_info.scale_y * zoom_in_factor).clamp(0.0, 1.0);
+            }
+
+            if c(CropControl::ZoomXMinus)
+            {
+                crop_info.scale_x = (crop_info.scale_x * zoom_out_factor).clamp(0.0, 1.0);
+            }
+
+            if c(CropControl::ZoomYMinus)
+            {
+                crop_info.scale_y = (crop_info.scale_y * zoom_out_factor).clamp(0.0, 1.0);
+            }
+
+            let change_pos = |value: &mut f32, amount: f32, zoom: f32|
+            {
+                let half_zoom = zoom * 0.5;
+
+                let low = half_zoom;
+                let high = 1.0 - half_zoom;
+
+                *value = (*value + amount).clamp(low, high);
+            };
+
+            let move_speed = 0.1 * dt;
+
+            if c(CropControl::ShiftXPlus)
+            {
+                change_pos(&mut crop_info.pos_x, move_speed, crop_info.scale_x);
+            }
+
+            if c(CropControl::ShiftXMinus)
+            {
+                change_pos(&mut crop_info.pos_x, -move_speed, crop_info.scale_x);
+            }
+
+            if c(CropControl::ShiftYMinus)
+            {
+                change_pos(&mut crop_info.pos_y, move_speed, crop_info.scale_y);
+            }
+
+            if c(CropControl::ShiftYPlus)
+            {
+                change_pos(&mut crop_info.pos_y, -move_speed, crop_info.scale_y);
+            }
+        }
+
+        let surface_rect;
+        let mut is_same_size = false;
+
+        if crop_info == CropInfo::new()
         {
             let mut surface = canvas.window().surface(&events).unwrap();
             surface_rect = surface.rect();
@@ -433,10 +569,43 @@ fn main()
             }
 
             surface.update_window().unwrap();
-        }
+        } else
+        {
+            let mut surface = canvas.window().surface(&events).unwrap();
+            surface_rect = surface.rect();
 
-        let frametime = last_frame.elapsed().as_secs_f64() * 1000.0;
-        let current_average = averager.add(frametime);
+            let original_width = image.width();
+            let original_height = image.height();
+
+            let mut data = image.into_raw();
+
+            let surface_image = Surface::from_data(
+                &mut data,
+                original_width,
+                original_height,
+                original_width * 3,
+                PixelFormatEnum::RGB24
+            ).unwrap();
+
+            let width = (original_width as f32 * crop_info.scale_x) as u32;
+            let height = (original_height as f32 * crop_info.scale_y) as u32;
+
+            let pos_of = |p: f32, s: f32, original: u32| -> i32
+            {
+                ((p - s * 0.5) * original as f32) as i32
+            };
+
+            let cropped_rect = Rect::new(
+                pos_of(crop_info.pos_x, crop_info.scale_x, original_width),
+                pos_of(crop_info.pos_y, crop_info.scale_y, original_height),
+                width,
+                height
+            );
+
+            surface_image.blit_scaled(Some(cropped_rect), &mut surface, surface_rect).unwrap();
+
+            surface.update_window().unwrap();
+        }
 
         title_delay -= 1;
         if title_delay <= 0
