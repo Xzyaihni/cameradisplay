@@ -1,6 +1,5 @@
 use std::{
     thread,
-    convert,
     time::Duration,
     sync::{
         Arc,
@@ -97,8 +96,8 @@ impl<const WINDOW_SIZE: usize> Averager<WINDOW_SIZE>
 enum ProgramMessage
 {
     Render(Box<RgbImage>),
-    SetWindowSize(u32, u32),
-    SetClosestAspect(f64),
+    ResetWindow,
+    SetClosestAspect,
     SetTitle(String)
 }
 
@@ -257,8 +256,6 @@ fn main()
 
     let Resolution{width_x: width, height_y: height} = camera.camera_format().resolution();
 
-    let aspect = width as f64 / height as f64;
-
     camera.open_stream().unwrap();
 
     let mut gamma_mode = GammaMode::Manual{fullbright: false, current: gamma_control.current()};
@@ -275,7 +272,6 @@ fn main()
     let mut last_frame = Instant::now();
 
     let (tx, rx) = mpsc::channel();
-    let (response_tx, response_rx) = mpsc::channel();
 
     let slow_events = Arc::new(Mutex::new(Vec::new()));
 
@@ -402,75 +398,83 @@ fn main()
                     slow_events.lock().unwrap().push(event);
                 }
 
+                let update_aspect = |canvas: &mut _, crop_info: CropInfo|
                 {
-                    let dt: f32 = 1.0 / update_fps as f32;
+                    let aspect = (width as f64 * crop_info.scale_x as f64)
+                        / (height as f64 * crop_info.scale_y as f64);
 
-                    let zoom_speed = 0.25;
+                    set_closest_aspect(canvas, aspect)
+                };
 
-                    let zoom_in_factor = 1.0 - dt * zoom_speed;
-                    let zoom_out_factor = 1.0 + dt * zoom_speed;
+                let dt: f32 = 1.0 / update_fps as f32;
 
-                    let c = |x| crop_controls[x as usize];
+                let zoom_speed = 0.25;
 
-                    let low_zoom = 0.01;
+                let zoom_in_factor = 1.0 - dt * zoom_speed;
+                let zoom_out_factor = 1.0 + dt * zoom_speed;
 
-                    if c(CropControl::ZoomXPlus)
-                    {
-                        crop_info.scale_x = (crop_info.scale_x * zoom_in_factor).clamp(low_zoom, 1.0);
-                    }
+                let c = |x| crop_controls[x as usize];
 
-                    if c(CropControl::ZoomYPlus)
-                    {
-                        crop_info.scale_y = (crop_info.scale_y * zoom_in_factor).clamp(low_zoom, 1.0);
-                    }
+                let low_zoom = 0.01;
 
-                    if c(CropControl::ZoomXMinus)
-                    {
-                        crop_info.scale_x = (crop_info.scale_x * zoom_out_factor).clamp(low_zoom, 1.0);
-                    }
+                if c(CropControl::ZoomXPlus)
+                {
+                    crop_info.scale_x = (crop_info.scale_x * zoom_in_factor).clamp(low_zoom, 1.0);
+                }
 
-                    if c(CropControl::ZoomYMinus)
-                    {
-                        crop_info.scale_y = (crop_info.scale_y * zoom_out_factor).clamp(low_zoom, 1.0);
-                    }
+                if c(CropControl::ZoomYPlus)
+                {
+                    crop_info.scale_y = (crop_info.scale_y * zoom_in_factor).clamp(low_zoom, 1.0);
+                }
 
-                    let change_pos = |value: &mut f32, amount: f32, zoom: f32|
-                    {
-                        let half_zoom = zoom * 0.5;
+                if c(CropControl::ZoomXMinus)
+                {
+                    crop_info.scale_x = (crop_info.scale_x * zoom_out_factor).clamp(low_zoom, 1.0);
+                }
 
-                        let low = half_zoom;
-                        let high = 1.0 - half_zoom;
+                if c(CropControl::ZoomYMinus)
+                {
+                    crop_info.scale_y = (crop_info.scale_y * zoom_out_factor).clamp(low_zoom, 1.0);
+                }
 
-                        *value = (*value + amount * zoom).clamp(low, high);
-                    };
+                let change_pos = |value: &mut f32, amount: f32, zoom: f32|
+                {
+                    let half_zoom = zoom * 0.5;
 
-                    let move_speed = 0.8 * dt;
+                    let low = half_zoom;
+                    let high = 1.0 - half_zoom;
 
-                    if c(CropControl::ShiftXPlus)
-                    {
-                        change_pos(&mut crop_info.pos_x, move_speed, crop_info.scale_x);
-                    }
+                    *value = (*value + amount * zoom).clamp(low, high);
+                };
 
-                    if c(CropControl::ShiftXMinus)
-                    {
-                        change_pos(&mut crop_info.pos_x, -move_speed, crop_info.scale_x);
-                    }
+                let move_speed = 0.8 * dt;
 
-                    if c(CropControl::ShiftYMinus)
-                    {
-                        change_pos(&mut crop_info.pos_y, move_speed, crop_info.scale_y);
-                    }
+                if c(CropControl::ShiftXPlus)
+                {
+                    change_pos(&mut crop_info.pos_x, move_speed, crop_info.scale_x);
+                }
 
-                    if c(CropControl::ShiftYPlus)
-                    {
-                        change_pos(&mut crop_info.pos_y, -move_speed, crop_info.scale_y);
-                    }
+                if c(CropControl::ShiftXMinus)
+                {
+                    change_pos(&mut crop_info.pos_x, -move_speed, crop_info.scale_x);
+                }
 
-                    if crop_controls.iter().copied().any(convert::identity)
-                    {
-                        let idk = ();
-                        // set_closest_aspect(&mut canvas, aspect * crop_info.aspect());
-                    }
+                if c(CropControl::ShiftYMinus)
+                {
+                    change_pos(&mut crop_info.pos_y, move_speed, crop_info.scale_y);
+                }
+
+                if c(CropControl::ShiftYPlus)
+                {
+                    change_pos(&mut crop_info.pos_y, -move_speed, crop_info.scale_y);
+                }
+
+                if c(CropControl::ZoomXPlus)
+                    || c(CropControl::ZoomXMinus)
+                    || c(CropControl::ZoomYPlus)
+                    || c(CropControl::ZoomYMinus)
+                {
+                    update_aspect(&mut canvas, crop_info);
                 }
 
                 if let Some(received) = received
@@ -505,43 +509,36 @@ fn main()
 
                             let camera_texture = camera_texture.as_ref().unwrap();
 
-                            let src = if crop_info == CropInfo::new()
+                            let width = (original_width as f32 * crop_info.scale_x) as u32;
+                            let height = (original_height as f32 * crop_info.scale_y) as u32;
+
+                            let pos_of = |p: f32, s: f32, original: u32| -> i32
                             {
-                                None
-                            } else
-                            {
-                                let width = (original_width as f32 * crop_info.scale_x) as u32;
-                                let height = (original_height as f32 * crop_info.scale_y) as u32;
-
-                                let pos_of = |p: f32, s: f32, original: u32| -> i32
-                                {
-                                    ((p - s * 0.5) * original as f32) as i32
-                                };
-
-                                let cropped_rect = Rect::new(
-                                    pos_of(crop_info.pos_x, crop_info.scale_x, original_width),
-                                    pos_of(crop_info.pos_y, crop_info.scale_y, original_height),
-                                    width,
-                                    height
-                                );
-
-                                Some(cropped_rect)
+                                ((p - s * 0.5) * original as f32) as i32
                             };
 
-                            canvas.copy(camera_texture, src, None).unwrap();
+                            let cropped_rect = Rect::new(
+                                pos_of(crop_info.pos_x, crop_info.scale_x, original_width),
+                                pos_of(crop_info.pos_y, crop_info.scale_y, original_height),
+                                width,
+                                height
+                            );
+
+                            canvas.copy(camera_texture, Some(cropped_rect), None).unwrap();
                             canvas.present();
                         },
-                        ProgramMessage::SetWindowSize(width, height) =>
+                        ProgramMessage::ResetWindow =>
                         {
                             if let Err(err) = canvas.window_mut().set_size(width, height)
                             {
                                 eprintln!("error setting window size: {err}");
                             }
+
+                            crop_info = CropInfo::new();
                         },
-                        ProgramMessage::SetClosestAspect(aspect) =>
+                        ProgramMessage::SetClosestAspect =>
                         {
-                            let has_resized = !set_closest_aspect(&mut canvas, aspect);
-                            response_tx.send(has_resized).unwrap();
+                            update_aspect(&mut canvas, crop_info);
                         },
                         ProgramMessage::SetTitle(title) =>
                         {
@@ -565,7 +562,7 @@ fn main()
             match event
             {
                 Event::Quit{..} => break 'window_loop,
-                Event::Window{win_event: WindowEvent::SizeChanged(_, _), ..} =>
+                Event::Window{win_event: WindowEvent::Resized(_, _), ..} =>
                 {
                     resized = true;
                 },
@@ -575,7 +572,7 @@ fn main()
                     {
                         Keycode::SPACE =>
                         {
-                            tx.send(ProgramMessage::SetWindowSize(width, height)).unwrap();
+                            tx.send(ProgramMessage::ResetWindow).unwrap();
                         },
                         Keycode::M =>
                         {
@@ -636,11 +633,8 @@ fn main()
 
         if resized
         {
-            tx.send(ProgramMessage::SetClosestAspect(aspect)).unwrap();
-            if response_rx.recv().unwrap()
-            {
-                resized = false;
-            }
+            tx.send(ProgramMessage::SetClosestAspect).unwrap();
+            resized = false;
         }
 
         let frame = match camera.frame()
